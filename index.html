@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="3通貨">
+<meta name="theme-color" content="#0E1116">
+<title>3通貨コンバーター</title>
+<!--
+==================================================================
+ DESIGN MEMO — 3通貨コンバーター (FX3)
+ 目的   : 海外出張で「現地通貨 ⇄ 円 ⇄ 同行者の通貨」を一度の入力で同時表示
+ 配色   : bg #0E1116 / panel #161B22 / line #252C36 / accent amber #FFB020
+ 書体   : IBM Plex Sans JP (UI) + IBM Plex Mono (数値) ※CDN不使用・端末フォールバック
+ 構成   : [取込日時 + 更新ボタン] → [JPY] → [通貨1] → [通貨2]
+ 入力   : ソフトキーボード (inputmode=decimal) のみ。どの段に入力しても他2段が連動
+ 保存   : localStorage "fx3" { rates(1円あたり), fetchedAt, src, srcTime, c1, c2, last }
+ レート : open.er-api.com → fawazahmed0 currency-api (jsDelivr / pages.dev) の順に試行
+ オフライン: sw.js があれば登録（HTTPS配信時）。無くても単体で動作
+==================================================================
+-->
+<style>
+:root{
+  --bg:#0E1116; --panel:#161B22; --line:#252C36;
+  --text:#E8EAED; --mute:#8B94A1; --amber:#FFB020; --warn:#FF6B5A;
+  --ui:"IBM Plex Sans JP","Hiragino Sans","Hiragino Kaku Gothic ProN",-apple-system,system-ui,sans-serif;
+  --num:"IBM Plex Mono",ui-monospace,"SF Mono",Menlo,monospace;
+  --fs:clamp(40px,13.5vw,62px);
+  color-scheme:dark;
+}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+html,body{background:var(--bg);color:var(--text);font-family:var(--ui)}
+body{
+  min-height:100dvh;
+  padding:max(10px,env(safe-area-inset-top)) max(0px,env(safe-area-inset-right)) env(safe-area-inset-bottom) max(0px,env(safe-area-inset-left));
+}
+
+/* ---- header ---- */
+header{
+  display:flex;align-items:center;gap:12px;
+  padding:10px 16px 12px;border-bottom:1px solid var(--line);
+}
+.stamp{flex:1;min-width:0}
+.stamp .when{font-family:var(--num);font-size:17px;font-weight:600;letter-spacing:.01em;white-space:nowrap}
+.stamp .when .age{font-family:var(--ui);font-size:13px;font-weight:400;color:var(--mute);margin-left:6px}
+.stamp .src{font-size:11.5px;color:var(--mute);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.stamp.stale .when{color:var(--warn)}
+.stamp.none .when{color:var(--mute);font-family:var(--ui);font-size:15px}
+#refresh{
+  flex:none;font:600 15px var(--ui);color:#1A1200;background:var(--amber);
+  border:0;border-radius:10px;padding:11px 14px;min-height:44px;
+}
+#refresh:active{filter:brightness(.85)}
+#refresh[disabled]{background:#5a4a24;color:#c9b88a}
+#refresh:focus-visible{outline:2px solid var(--text);outline-offset:2px}
+
+/* ---- rows ---- */
+.row{
+  position:relative;display:grid;grid-template-columns:auto 1fr;align-items:center;
+  column-gap:12px;padding:14px 16px 12px 16px;border-bottom:1px solid var(--line);
+  border-left:4px solid transparent;
+}
+.row.active{border-left-color:var(--amber);background:var(--panel)}
+.cur{position:relative;display:flex;flex-direction:column;min-width:84px}
+.cur .top{display:flex;align-items:center;gap:6px}
+.cur .flag{font-size:26px;line-height:1}
+.cur .code{font:700 22px var(--num);letter-spacing:.02em}
+.cur .caret{color:var(--mute);font-size:13px;margin-left:-2px}
+.cur .name{font-size:11.5px;color:var(--mute);margin-top:3px;white-space:nowrap}
+.cur select{
+  position:absolute;inset:-8px;opacity:0;font-size:16px;width:calc(100% + 16px);height:calc(100% + 16px);
+}
+.amt{
+  min-width:0;width:100%;text-align:right;
+  font-family:var(--num);font-weight:500;font-size:var(--fs);line-height:1.15;
+  font-variant-numeric:tabular-nums;letter-spacing:-.02em;
+  color:var(--text);background:transparent;border:0;outline:0;caret-color:var(--amber);
+}
+.amt::placeholder{color:#3a424e}
+.row.jpy .amt{color:var(--amber)}
+.sub{
+  grid-column:1/-1;text-align:right;font-family:var(--num);font-size:13px;color:var(--mute);
+  margin-top:4px;min-height:1.2em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis
+}
+
+.empty{
+  margin:18px 16px;padding:14px;border:1px dashed var(--line);border-radius:10px;
+  color:var(--mute);font-size:14px;line-height:1.6
+}
+.empty[hidden]{display:none}
+
+#toast{
+  position:fixed;left:50%;bottom:calc(24px + env(safe-area-inset-bottom));transform:translate(-50%,20px);
+  background:#222a35;color:var(--text);border:1px solid var(--line);border-radius:10px;
+  padding:10px 14px;font-size:14px;max-width:90vw;opacity:0;pointer-events:none;
+  transition:opacity .2s,transform .2s
+}
+#toast.show{opacity:1;transform:translate(-50%,0)}
+@media (prefers-reduced-motion:reduce){#toast{transition:none}}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="stamp none" id="stamp">
+    <div class="when" id="when">レート未取得</div>
+    <div class="src" id="src">ネット接続中に更新してください</div>
+  </div>
+  <button id="refresh" type="button">レートを更新</button>
+</header>
+
+<main id="rows"></main>
+
+<p class="empty" id="empty">まだレートがありません。ネットに繋がっている間に「レートを更新」を押すと、そのレートが端末に保存され、以後はオフラインで計算できます。</p>
+
+<div id="toast" role="status" aria-live="polite"></div>
+
+<script>
+(() => {
+"use strict";
+
+/* ---------- 通貨マスタ ---------- */
+const CUR = [
+  ["JPY","🇯🇵","日本円",0],
+  ["PHP","🇵🇭","フィリピン・ペソ",2],
+  ["AUD","🇦🇺","オーストラリア・ドル",2],
+  ["USD","🇺🇸","米ドル",2],
+  ["EUR","🇪🇺","ユーロ",2],
+  ["GBP","🇬🇧","英ポンド",2],
+  ["NZD","🇳🇿","NZドル",2],
+  ["CAD","🇨🇦","カナダ・ドル",2],
+  ["CHF","🇨🇭","スイス・フラン",2],
+  ["CNY","🇨🇳","人民元",2],
+  ["HKD","🇭🇰","香港ドル",2],
+  ["TWD","🇹🇼","台湾ドル",1],
+  ["KRW","🇰🇷","韓国ウォン",0],
+  ["SGD","🇸🇬","シンガポール・ドル",2],
+  ["THB","🇹🇭","タイ・バーツ",2],
+  ["MYR","🇲🇾","マレーシア・リンギット",2],
+  ["IDR","🇮🇩","インドネシア・ルピア",0],
+  ["VND","🇻🇳","ベトナム・ドン",0],
+  ["INR","🇮🇳","インド・ルピー",2],
+  ["AED","🇦🇪","UAEディルハム",2],
+  ["SAR","🇸🇦","サウジ・リヤル",2],
+  ["BRL","🇧🇷","ブラジル・レアル",2],
+  ["MXN","🇲🇽","メキシコ・ペソ",2],
+  ["SEK","🇸🇪","スウェーデン・クローナ",2],
+  ["PLN","🇵🇱","ポーランド・ズウォティ",2],
+  ["TRY","🇹🇷","トルコ・リラ",2],
+];
+const INFO = Object.fromEntries(CUR.map(([c,f,n,d]) => [c,{c,f,n,d}]));
+
+/* ---------- 保存 ---------- */
+const KEY = "fx3";
+let S = {};
+try { S = JSON.parse(localStorage.getItem(KEY)) || {}; } catch (e) { S = {}; }
+S.c1 = INFO[S.c1] ? S.c1 : "PHP";
+S.c2 = INFO[S.c2] ? S.c2 : "AUD";
+if (S.c1 === S.c2) S.c2 = S.c1 === "AUD" ? "PHP" : "AUD";
+S.last = S.last || { i: 0, v: "" };
+const save = () => { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) {} };
+
+const codes = () => ["JPY", S.c1, S.c2];
+const rateOf = c => c === "JPY" ? 1 : (S.rates && S.rates[c]) || null; // 1円あたりの外貨
+
+/* ---------- 数値整形 ---------- */
+const parse = s => {
+  const t = String(s).replace(/[,\s]/g, "").replace(/[０-９．]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0));
+  if (t === "" || t === ".") return NaN;
+  return Number(t);
+};
+const fmt = (n, c) => {
+  if (!isFinite(n)) return "";
+  const d = INFO[c].d;
+  return new Intl.NumberFormat("en-US", { minimumFractionDigits: 0, maximumFractionDigits: d }).format(n);
+};
+const fmtRate = n => new Intl.NumberFormat("en-US", { maximumSignificantDigits: 4 }).format(n);
+
+/* ---------- 画面構築 ---------- */
+const rowsEl = document.getElementById("rows");
+const rows = [0,1,2].map(i => {
+  const r = document.createElement("section");
+  r.className = "row" + (i === 0 ? " jpy" : "");
+  r.innerHTML = `
+    <label class="cur">
+      <span class="top"><span class="flag"></span><span class="code"></span>${i ? '<span class="caret">▾</span>' : ''}</span>
+      <span class="name"></span>
+      ${i ? '<select aria-label="通貨を選択"></select>' : ''}
+    </label>
+    <input class="amt" type="text" inputmode="decimal" autocomplete="off" autocorrect="off" spellcheck="false" placeholder="0" aria-label="金額">
+    <div class="sub"></div>`;
+  rowsEl.appendChild(r);
+  const o = {
+    el: r, inp: r.querySelector(".amt"), sub: r.querySelector(".sub"),
+    flag: r.querySelector(".flag"), code: r.querySelector(".code"),
+    name: r.querySelector(".name"), sel: r.querySelector("select")
+  };
+  if (o.sel) {
+    o.sel.innerHTML = CUR.filter(x => x[0] !== "JPY")
+      .map(([c,f,n]) => `<option value="${c}">${f} ${c} ${n}</option>`).join("");
+    o.sel.addEventListener("change", () => changeCurrency(i, o.sel.value));
+  }
+  // 行のどこをタップしても入力へ
+  r.addEventListener("click", e => { if (!e.target.closest("select") && e.target !== o.inp) o.inp.focus(); });
+  o.inp.addEventListener("focus", () => {
+    rows.forEach(x => x.el.classList.remove("active"));
+    r.classList.add("active");
+    o.inp.value = o.inp.value.replace(/,/g, "");
+    fit(o.inp);
+    setTimeout(() => { try { o.inp.setSelectionRange(0, o.inp.value.length); } catch (e) {} }, 0);
+  });
+  o.inp.addEventListener("input", () => {
+    let v = o.inp.value.replace(/[^\d.,０-９．]/g, "");
+    if (v !== o.inp.value) o.inp.value = v;
+    S.last = { i, v: o.inp.value };
+    recalc();
+    save();
+  });
+  o.inp.addEventListener("blur", () => {
+    const n = parse(o.inp.value);
+    o.inp.value = isFinite(n) ? fmt(n, codes()[i]) : "";
+    fit(o.inp);
+  });
+  return o;
+});
+
+function fit(inp) {
+  const len = inp.value.length;
+  inp.style.fontSize = len > 8 ? `max(24px, calc(var(--fs) * ${(8 / len).toFixed(3)}))` : "";
+}
+
+function renderLabels() {
+  codes().forEach((c, i) => {
+    const o = rows[i], m = INFO[c];
+    o.flag.textContent = m.f; o.code.textContent = c; o.name.textContent = m.n;
+    if (o.sel) o.sel.value = c;
+  });
+}
+
+function renderSubs() {
+  const [, a, b] = codes();
+  const ra = rateOf(a), rb = rateOf(b);
+  rows[0].sub.textContent = (ra && rb) ? `1 ${b} = ${fmtRate(ra / rb)} ${a}` : "";
+  rows[1].sub.textContent = ra ? `1 ${a} = ${fmtRate(1 / ra)} 円` : (S.rates ? `${a} のレートなし` : "");
+  rows[2].sub.textContent = rb ? `1 ${b} = ${fmtRate(1 / rb)} 円` : (S.rates ? `${b} のレートなし` : "");
+}
+
+function recalc() {
+  const cs = codes(), { i, v } = S.last;
+  const n = parse(v), src = rateOf(cs[i]);
+  rows.forEach((o, k) => {
+    if (k === i) {
+      if (document.activeElement !== o.inp) o.inp.value = isFinite(n) ? fmt(n, cs[k]) : (v || "");
+    } else {
+      const dst = rateOf(cs[k]);
+      o.inp.value = (isFinite(n) && src && dst) ? fmt(n / src * dst, cs[k]) : "";
+    }
+    fit(o.inp);
+  });
+  renderSubs();
+}
+
+function changeCurrency(i, c) {
+  const other = i === 1 ? "c2" : "c1", me = i === 1 ? "c1" : "c2";
+  if (S[other] === c) S[other] = S[me]; // 同じ通貨を選んだら入れ替え
+  S[me] = c;
+  save(); renderLabels(); recalc();
+}
+
+/* ---------- 取込日時表示 ---------- */
+const pad = n => String(n).padStart(2, "0");
+const ymdhm = d => `${d.getFullYear()}/${pad(d.getMonth()+1)}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+function renderStamp() {
+  const st = document.getElementById("stamp"), w = document.getElementById("when"), s = document.getElementById("src");
+  document.getElementById("empty").hidden = !!S.rates;
+  if (!S.rates || !S.fetchedAt) { st.className = "stamp none"; return; }
+  const d = new Date(S.fetchedAt);
+  const days = Math.floor((new Date().setHours(0,0,0,0) - new Date(d).setHours(0,0,0,0)) / 864e5);
+  const age = days <= 0 ? "今日" : `${days}日前`;
+  st.className = "stamp" + (days >= 3 ? " stale" : "");
+  w.innerHTML = `${ymdhm(d)}<span class="age">取込・${age}</span>`;
+  s.textContent = `レート基準 ${S.srcTime ? ymdhm(new Date(S.srcTime)) : "—"}（${S.src || ""}）`;
+}
+
+/* ---------- レート取得 ---------- */
+async function getJSON(url, ms = 9000) {
+  const ac = new AbortController(), t = setTimeout(() => ac.abort(), ms);
+  try {
+    const r = await fetch(url, { signal: ac.signal, cache: "no-store" });
+    if (!r.ok) throw new Error(r.status);
+    return await r.json();
+  } finally { clearTimeout(t); }
+}
+const SOURCES = [
+  async () => {
+    const j = await getJSON("https://open.er-api.com/v6/latest/JPY");
+    if (j.result !== "success" || !j.rates) throw 0;
+    return { rates: j.rates, time: j.time_last_update_unix * 1000, src: "open.er-api.com" };
+  },
+  async () => {
+    const j = await getJSON("https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/jpy.json");
+    return fromFawaz(j, "currency-api");
+  },
+  async () => {
+    const j = await getJSON("https://latest.currency-api.pages.dev/v1/currencies/jpy.json");
+    return fromFawaz(j, "currency-api");
+  },
+];
+function fromFawaz(j, src) {
+  if (!j || !j.jpy) throw 0;
+  const rates = {};
+  for (const k in j.jpy) rates[k.toUpperCase()] = j.jpy[k];
+  return { rates, time: j.date ? new Date(j.date + "T00:00:00Z").getTime() : null, src };
+}
+
+const btn = document.getElementById("refresh");
+btn.addEventListener("click", async () => {
+  btn.disabled = true; btn.textContent = "取得中…";
+  let got = null;
+  for (const f of SOURCES) { try { got = await f(); break; } catch (e) {} }
+  btn.disabled = false; btn.textContent = "レートを更新";
+  if (!got) {
+    toast(S.rates ? "取得できませんでした。保存済みのレートで計算を続けます" : "取得できませんでした。ネット接続を確認してください");
+    return;
+  }
+  const keep = {};
+  CUR.forEach(([c]) => { if (c !== "JPY" && got.rates[c]) keep[c] = got.rates[c]; });
+  S.rates = keep; S.fetchedAt = Date.now(); S.srcTime = got.time; S.src = got.src;
+  save(); renderStamp(); recalc();
+  toast("レートを更新しました");
+});
+
+let tt;
+function toast(msg) {
+  const t = document.getElementById("toast");
+  t.textContent = msg; t.classList.add("show");
+  clearTimeout(tt); tt = setTimeout(() => t.classList.remove("show"), 2600);
+}
+
+/* ---------- 起動 ---------- */
+renderLabels(); renderStamp(); recalc();
+setInterval(renderStamp, 60000);
+
+// HTTPS で sw.js と一緒に置いた場合のみオフラインキャッシュ
+if ("serviceWorker" in navigator && location.protocol === "https:") {
+  navigator.serviceWorker.register("sw.js").catch(() => {});
+}
+})();
+</script>
+</body>
+</html>
