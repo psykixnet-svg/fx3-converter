@@ -1,5 +1,5 @@
-// 3通貨コンバーター: 画面ファイルを端末にキャッシュし、オフラインでも起動できるようにする
-const C = "fx3-v1";
+// 通貨コンバーター: 画面ファイルを端末にキャッシュし、オフラインでも起動できるようにする
+const C = "fx3-v2";
 self.addEventListener("install", e => {
   e.waitUntil(caches.open(C).then(c => c.addAll(["./", "./index.html"])));
   self.skipWaiting();
